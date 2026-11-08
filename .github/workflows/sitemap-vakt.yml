@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
-    inputs:
-      url:
-        description: "URL att kontrollera (tom = produktionsadressen)"
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -25,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      SITEMAP: "${{ inputs.url || 'https://docmasker.app/sitemap.xml' }}"
+      SITEMAP: https://docmasker.app/sitemap.xml
     steps:
       - name: Hämta sitemapen
         id: hamta
@@ -46,7 +40,7 @@ jobs:
           BYTES: ${{ steps.hamta.outputs.bytes }}
         with:
           script: |
-            const title = `[Sitemap-vakt] ${process.env.SITEMAP} svarar inte 200`;
+            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
             const body = [
               `Sitemapen svarade **HTTP ${process.env.STATUS}** (${process.env.BYTES} byte).`,
               '',
@@ -87,13 +81,14 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
             const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               per_page: 100
             });
-            for (const issue of open.data.filter(i => i.title.startsWith('[Sitemap-vakt]'))) {
+            for (const issue of open.data.filter(i => i.title === title)) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
