@@ -1,0 +1,104 @@
+name: Sitemap-vakt
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sitemap-vakt
+  cancel-in-progress: true
+
+jobs:
+  kontroll:
+    name: Kontrollera sitemapen
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SITEMAP: https://docmasker.app/sitemap.xml
+    steps:
+      - name: Hämta sitemapen
+        id: hamta
+        shell: bash
+        run: |
+          code=$(curl -sS -L --max-time 20 -o sitemap.xml -w '%{http_code}' "$SITEMAP" || true)
+          bytes=$(wc -c < sitemap.xml 2>/dev/null || echo 0)
+          echo "status=$code" >> "$GITHUB_OUTPUT"
+          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
+          echo "Sitemap: HTTP $code, $bytes byte"
+
+      - name: Larma vid fel
+        id: larma
+        if: steps.hamta.outputs.status != '200'
+        uses: actions/github-script@v7
+        env:
+          STATUS: ${{ steps.hamta.outputs.status }}
+          BYTES: ${{ steps.hamta.outputs.bytes }}
+        with:
+          script: |
+            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
+            const body = [
+              `Sitemapen svarade **HTTP ${process.env.STATUS}** (${process.env.BYTES} byte).`,
+              '',
+              `- URL: ${process.env.SITEMAP}`,
+              `- Tid: ${new Date().toISOString()}`,
+              `- Körning: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Issuen stängs automatiskt nästa gång sitemapen svarar 200.'
+            ].join('\n');
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = open.data.find(issue => issue.title === title);
+            if (existing) {
+              core.info(`Larmet finns redan: #${existing.number}`);
+              core.setOutput('ny', 'false');
+            } else {
+              const skapad = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                assignees: [context.repo.owner]
+              });
+              core.info(`Öppnade larm #${skapad.data.number}`);
+              core.setOutput('ny', 'true');
+            }
+
+      - name: Misslyckas så att GitHub mejlar
+        if: steps.larma.outputs.ny == 'true'
+        run: exit 1
+
+      - name: Stäng larmet när sitemapen svarar 200
+        if: steps.hamta.outputs.status == '200'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            for (const issue of open.data.filter(i => i.title === title)) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Sitemapen svarar 200 igen (${new Date().toISOString()}). Larmet stängs.`
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+            }
