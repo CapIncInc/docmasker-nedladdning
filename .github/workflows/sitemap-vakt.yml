@@ -20,35 +20,61 @@ jobs:
     timeout-minutes: 5
     env:
       SITEMAP: https://docmasker.app/sitemap.xml
+      FORVANTAT_ANTAL: "17"
     steps:
-      - name: Hämta sitemapen
+      - name: Hämta och granska sitemapen
         id: hamta
         shell: bash
         run: |
           code=$(curl -sS -L --max-time 20 -o sitemap.xml -w '%{http_code}' "$SITEMAP" || true)
           bytes=$(wc -c < sitemap.xml 2>/dev/null || echo 0)
-          echo "status=$code" >> "$GITHUB_OUTPUT"
-          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
-          echo "Sitemap: HTTP $code, $bytes byte"
+          mapfile -t platser < <(grep -o '<loc>[^<]*</loc>' sitemap.xml 2>/dev/null | sed -e 's|^<loc>||' -e 's|</loc>$||')
+          antal=${#platser[@]}
+          fel_vard=0
+          for plats in "${platser[@]}"; do
+            vard=${plats#*://}
+            vard=${vard%%/*}
+            if [ "$vard" != "docmasker.app" ]; then
+              echo "Fel värd: $plats"
+              fel_vard=$((fel_vard + 1))
+            fi
+          done
+          if [ "$code" = "200" ] && [ "$antal" -eq "$FORVANTAT_ANTAL" ] && [ "$fel_vard" -eq 0 ]; then
+            ok=true
+          else
+            ok=false
+          fi
+          {
+            echo "status=$code"
+            echo "bytes=$bytes"
+            echo "antal=$antal"
+            echo "fel_vard=$fel_vard"
+            echo "ok=$ok"
+          } >> "$GITHUB_OUTPUT"
+          echo "Sitemap: HTTP $code, $bytes byte, $antal URL:er, $fel_vard fel värd"
 
       - name: Larma vid fel
         id: larma
-        if: steps.hamta.outputs.status != '200'
+        if: steps.hamta.outputs.ok != 'true'
         uses: actions/github-script@v7
         env:
           STATUS: ${{ steps.hamta.outputs.status }}
           BYTES: ${{ steps.hamta.outputs.bytes }}
+          ANTAL: ${{ steps.hamta.outputs.antal }}
+          FEL_VARD: ${{ steps.hamta.outputs.fel_vard }}
         with:
           script: |
-            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
+            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml är inte frisk';
             const body = [
               `Sitemapen svarade **HTTP ${process.env.STATUS}** (${process.env.BYTES} byte).`,
               '',
               `- URL: ${process.env.SITEMAP}`,
+              `- URL:er i sitemapen: ${process.env.ANTAL} (förväntat ${process.env.FORVANTAT_ANTAL})`,
+              `- Poster med fel värd: ${process.env.FEL_VARD}`,
               `- Tid: ${new Date().toISOString()}`,
               `- Körning: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              'Issuen stängs automatiskt nästa gång sitemapen svarar 200.'
+              'Issuen stängs automatiskt nästa gång sitemapen svarar 200 med rätt antal URL:er och värd.'
             ].join('\n');
             const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -56,7 +82,7 @@ jobs:
               state: 'open',
               per_page: 100
             });
-            const existing = open.data.find(issue => issue.title === title);
+            const existing = open.data.find(issue => issue.title.startsWith('[Sitemap-vakt]'));
             if (existing) {
               core.info(`Larmet finns redan: #${existing.number}`);
               core.setOutput('ny', 'false');
@@ -76,24 +102,25 @@ jobs:
         if: steps.larma.outputs.ny == 'true'
         run: exit 1
 
-      - name: Stäng larmet när sitemapen svarar 200
-        if: steps.hamta.outputs.status == '200'
+      - name: Stäng larmet när sitemapen är frisk
+        if: steps.hamta.outputs.ok == 'true'
         uses: actions/github-script@v7
+        env:
+          ANTAL: ${{ steps.hamta.outputs.antal }}
         with:
           script: |
-            const title = '[Sitemap-vakt] docmasker.app/sitemap.xml svarar inte 200';
             const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               per_page: 100
             });
-            for (const issue of open.data.filter(i => i.title === title)) {
+            for (const issue of open.data.filter(i => i.title.startsWith('[Sitemap-vakt]'))) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                body: `Sitemapen svarar 200 igen (${new Date().toISOString()}). Larmet stängs.`
+                body: `Sitemapen svarar 200 igen med ${process.env.ANTAL} URL:er på docmasker.app (${new Date().toISOString()}). Larmet stängs.`
               });
               await github.rest.issues.update({
                 owner: context.repo.owner,
